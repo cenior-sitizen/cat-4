@@ -166,6 +166,7 @@ const PROCESSING_PENDING = [
   "Translating to English...",
   "Classifying severity...",
   "Generating case summary...",
+  "Applying confidence threshold rule...",
 ];
 
 function getProcessingResult(index: number, s: Scenario): string {
@@ -180,6 +181,10 @@ function getProcessingResult(index: number, s: Scenario): string {
       return `Classified: ${s.severity} (${s.confidence}% confidence)`;
     case 4:
       return "Case summary generated";
+    case 5:
+      return s.confidence >= 70
+        ? `Confidence ${s.confidence}% >= 70% threshold — classification confirmed`
+        : `Confidence ${s.confidence}% < 70% — escalated to Uncertain`;
     default:
       return "";
   }
@@ -408,11 +413,9 @@ export default function InteractiveDemo() {
         };
         const newStats: Stats = {
           total: prev.stats.total + 1,
-          urgent:
-            prev.stats.urgent + (scenario.severity === "Urgent" ? 1 : 0),
+          urgent: prev.stats.urgent + (scenario.severity === "Urgent" ? 1 : 0),
           uncertain:
-            prev.stats.uncertain +
-            (scenario.severity === "Uncertain" ? 1 : 0),
+            prev.stats.uncertain + (scenario.severity === "Uncertain" ? 1 : 0),
           autoResolved:
             prev.stats.autoResolved +
             (scenario.severity === "Non-urgent" ? 1 : 0),
@@ -454,15 +457,14 @@ export default function InteractiveDemo() {
     setState((prev) => ({
       ...prev,
       cases: prev.cases.map((c) =>
-        c.id === caseId ? { ...c, resolved: true } : c
+        c.id === caseId ? { ...c, resolved: true } : c,
       ),
     }));
   }, []);
 
   const sortedCases = [...state.cases].sort(
     (a, b) =>
-      severityOrder(a.scenario.severity) -
-      severityOrder(b.scenario.severity)
+      severityOrder(a.scenario.severity) - severityOrder(b.scenario.severity),
   );
 
   const currentScenario = state.selectedScenario
@@ -548,27 +550,27 @@ export default function InteractiveDemo() {
               </p>
 
               <div className="space-y-2 max-h-[260px] overflow-y-auto">
-                {(
-                  Object.entries(SCENARIOS) as [ScenarioKey, Scenario][]
-                ).map(([key, s]) => (
-                  <button
-                    key={key}
-                    onClick={() => handleScenarioSelect(key)}
-                    className="w-full text-left p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition-all cursor-pointer bg-gray-50/50 hover:bg-gray-50 group"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-[12px] text-gray-600 group-hover:text-gray-900 transition-colors leading-snug">
-                        {s.buttonEmoji}{" "}
-                        <span className="italic">
-                          &ldquo;{s.buttonLabel}&rdquo;
+                {(Object.entries(SCENARIOS) as [ScenarioKey, Scenario][]).map(
+                  ([key, s]) => (
+                    <button
+                      key={key}
+                      onClick={() => handleScenarioSelect(key)}
+                      className="w-full text-left p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition-all cursor-pointer bg-gray-50/50 hover:bg-gray-50 group"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-[12px] text-gray-600 group-hover:text-gray-900 transition-colors leading-snug">
+                          {s.buttonEmoji}{" "}
+                          <span className="italic">
+                            &ldquo;{s.buttonLabel}&rdquo;
+                          </span>
                         </span>
-                      </span>
-                      <span className="text-[9px] px-1.5 py-0.5 bg-gray-100 rounded text-gray-500 font-mono whitespace-nowrap mt-0.5">
-                        {s.langTag}
-                      </span>
-                    </div>
-                  </button>
-                ))}
+                        <span className="text-[9px] px-1.5 py-0.5 bg-gray-100 rounded text-gray-500 font-mono whitespace-nowrap mt-0.5">
+                          {s.langTag}
+                        </span>
+                      </div>
+                    </button>
+                  ),
+                )}
               </div>
             </div>
           )}
@@ -640,7 +642,7 @@ export default function InteractiveDemo() {
                     <span className="text-[12px] text-gray-700">{result}</span>
                   </div>
                 ))}
-                {state.processingSteps.length < 5 && (
+                {state.processingSteps.length < 6 && (
                   <div className="flex items-center gap-2">
                     <span className="w-4 h-4 rounded-full border border-gray-200 flex items-center justify-center flex-shrink-0">
                       <span className="w-1.5 h-1.5 rounded-full bg-gray-300 animate-pulse" />
@@ -750,7 +752,7 @@ export default function InteractiveDemo() {
                 </div>
                 <p className="text-[10px] text-green-600/80 mt-1 text-center">
                   {currentScenario.severity === "Non-urgent"
-                    ? "Auto-resolved by AI — no operator action needed. Logged for records."
+                    ? "Auto-resolved by AI — automated confirmation callback scheduled in 15 min. Logged for daily audit."
                     : currentScenario.severity === "Urgent"
                       ? "Operator receives full summary and calls elder back via PAB with context ready."
                       : "Flagged for review — operator calls elder back to assess with AI summary ready."}
@@ -825,9 +827,7 @@ export default function InteractiveDemo() {
                 <div className="w-3 h-3 rounded-full bg-green-500/30 animate-pulse" />
               </div>
               <div className="text-center">
-                <p className="text-gray-500 text-xs">
-                  No active cases
-                </p>
+                <p className="text-gray-500 text-xs">No active cases</p>
                 <p className="text-gray-600 text-[10px] mt-1">
                   AI is monitoring all incoming PAB alerts
                 </p>
@@ -849,8 +849,7 @@ export default function InteractiveDemo() {
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${severityBadgeDark(c.scenario.color)}`}
                     >
-                      {severityDot(c.scenario.severity)}{" "}
-                      {c.scenario.severity}
+                      {severityDot(c.scenario.severity)} {c.scenario.severity}
                     </span>
                     <span className="text-[10px] font-mono text-gray-500">
                       {c.id}
@@ -898,7 +897,7 @@ export default function InteractiveDemo() {
                 <div className="mt-2.5 flex gap-2">
                   {c.scenario.severity === "Non-urgent" ? (
                     <span className="text-[10px] px-2.5 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20">
-                      ✓ Auto-resolved by AI — no callback needed
+                      ✓ Auto-resolved — confirmation callback in 15 min
                     </span>
                   ) : c.resolved ? (
                     <span className="text-[10px] px-2.5 py-1 rounded bg-white/[0.05] text-gray-500 border border-white/[0.08]">

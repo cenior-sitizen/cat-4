@@ -50,7 +50,7 @@ const SOLUTION_PILLARS = [
     num: "03",
     title: "Better Allocation of Resources",
     description:
-      "Non-urgent cases auto-resolved by AI. Operators focus on urgent and uncertain cases. ClickHouse analytics reveal hotspot blocks and peak staffing hours",
+      "Non-urgent cases auto-resolved by AI with automated confirmation callbacks. Operators focus on urgent and uncertain cases. ClickHouse analytics reveal hotspot blocks and peak staffing hours",
     accent: "border-t-green-500",
   },
 ] as const;
@@ -118,6 +118,41 @@ const TECH_STACK = [
   { name: "Next.js", role: "Operator Dashboard", icon: "⚛️" },
   { name: "FastAPI", role: "Backend Webhook Handler", icon: "⚡" },
   { name: "ClickHouse", role: "Real-time Analytics DB", icon: "🗄️" },
+] as const;
+
+const SAFEGUARD_CARDS = [
+  {
+    icon: "🧑‍💼",
+    title: "AI Assists, Never Replaces",
+    description:
+      "AI handles transcription, translation, and triage — but every Urgent and Uncertain case is routed to a human operator who makes the final call. The operator always has override authority.",
+    accent: "border-t-cyan-500",
+    tag: "Philosophy",
+  },
+  {
+    icon: "🛡️",
+    title: "Auto-Resolve Safety Net",
+    description:
+      "Non-urgent cases auto-resolved by AI still receive an automated confirmation callback within 15 minutes. All auto-resolved cases are logged for daily supervisor audit.",
+    accent: "border-t-green-500",
+    tag: "Safeguard",
+  },
+  {
+    icon: "📊",
+    title: "Confidence Threshold Rule",
+    description:
+      "If AI confidence is below 70%, the case is always classified as Uncertain and escalated to an operator — even if the model's best guess is Non-urgent. Low confidence never auto-resolves.",
+    accent: "border-t-yellow-500",
+    tag: "Failsafe",
+  },
+  {
+    icon: "🎙️",
+    title: "ASR Fallback Strategy",
+    description:
+      "When speech recognition fails due to dialect, background noise, or silence, the system defaults to Uncertain and routes to an operator with the raw audio preserved for manual review.",
+    accent: "border-t-red-500",
+    tag: "Resilience",
+  },
 ] as const;
 
 const MOCK_BLOCK_DATA = [
@@ -318,7 +353,78 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ━━ Section 5: Analytics Preview (Dark) ━━ */}
+      {/* ━━ Section 5: Safeguards & Design Philosophy ━━ */}
+      <section className="py-24 px-6">
+        <div className="max-w-5xl mx-auto">
+          <div className="text-center mb-14">
+            <p className="text-xs uppercase tracking-[0.2em] text-gray-400 mb-3 font-mono">
+              Responsible AI
+            </p>
+            <h2 className="font-display text-3xl md:text-4xl text-gray-900 mb-4">
+              Safeguards &amp; Design Philosophy
+            </h2>
+            <p className="text-gray-500 text-sm max-w-2xl mx-auto leading-relaxed">
+              AI augments the operator&apos;s workflow — it never replaces human
+              judgment. Every design decision prioritises elder safety with
+              built-in failsafes.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-4xl mx-auto">
+            {SAFEGUARD_CARDS.map((card) => (
+              <div
+                key={card.title}
+                className={`bg-white rounded-xl border border-gray-200/80 border-t-2 ${card.accent} p-6 shadow-sm hover:shadow-md transition-shadow`}
+              >
+                <div className="flex items-center gap-3 mb-3">
+                  <span className="text-xl">{card.icon}</span>
+                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase tracking-wider">
+                    {card.tag}
+                  </span>
+                </div>
+                <h3 className="text-sm font-semibold text-gray-900 mb-2">
+                  {card.title}
+                </h3>
+                <p className="text-[13px] text-gray-500 leading-relaxed">
+                  {card.description}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-8 flex flex-wrap justify-center gap-3 max-w-3xl mx-auto">
+            {[
+              {
+                label: "PDPA Compliant",
+                detail: "Audio processed in-memory, no PII stored long-term",
+              },
+              {
+                label: "10s Clip Aware",
+                detail: "Incomplete recordings auto-flagged for operator",
+              },
+              {
+                label: "Cost Efficient",
+                detail: "~$0.003 per triage call via Claude Haiku",
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                className="flex items-center gap-2 bg-gray-50 border border-gray-200/80 rounded-full px-4 py-2"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
+                <span className="text-[11px] text-gray-700 font-medium">
+                  {item.label}
+                </span>
+                <span className="text-[10px] text-gray-400">
+                  — {item.detail}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ━━ Section 6: Analytics Preview (Dark) ━━ */}
       <section className="relative py-24 px-6 bg-[#0a1628] dot-grid text-white overflow-hidden">
         <div className="relative max-w-5xl mx-auto">
           <div className="text-center mb-14">
