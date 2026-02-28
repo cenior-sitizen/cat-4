@@ -1,6 +1,13 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Instrument_Serif, Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  subsets: ["latin"],
+  weight: "400",
+  style: ["normal", "italic"],
+});
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,8 +20,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PAB AI Triage System — GovTech",
-  description: "AI-powered voice triage layer for the Personal Alert Button system. Built for GovTech Hackathon 2025.",
+  title: "PAB AI Triage System — HackOMania 2026",
+  description:
+    "AI-powered triage layer for the Personal Alert Button system. Built for HackOMania 2026 — #TechForPublicGood.",
 };
 
 export default function RootLayout({
@@ -25,7 +33,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${instrumentSerif.variable} ${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
       </body>
