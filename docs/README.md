@@ -142,18 +142,426 @@ Layer 3: Behaviour Change Loop (Frontend)
 |---|---|---|
 | Frontend | Next.js + Tailwind CSS | Already in project, single-page demo |
 | AI Coach | Claude API (claude-haiku-4-5) | Fast, cost-effective for conversational coaching |
-| Analytics | TypeScript (frontend) | Deterministic signal extraction, no backend needed for demo |
-| Mock Data | Hardcoded JSON + generated intervals | Realistic 90-day half-hourly dataset |
-| State | React useState | All interactions are frontend state only |
+| **Analytics DB** | **ClickHouse Cloud** | **43.2M rows of half-hourly data, sub-second queries, real-time grid analytics** |
+| **DB Client** | **@clickhouse/client (server-side)** | **Queries via Next.js API routes — no credential exposure** |
+| Signal Extraction | TypeScript (API routes) | Deterministic baseline, peak detection, recommendation ranking |
+| State | React useState | UI state only; data fetched from API routes |
+
+### Architecture Diagram
+```
+Browser (Next.js frontend)
+  |
+  |-- /api/coach       --> Claude API (haiku) -- AI explanation + coaching
+  |-- /api/intervals   --> ClickHouse Cloud   -- household half-hourly data
+  |-- /api/grid        --> ClickHouse Cloud   -- neighbourhood aggregates (43.2M rows)
+  |-- /api/insights    --> TypeScript logic   -- deterministic signal extraction
+  |
+ClickHouse Cloud
+  |-- energy_intervals_raw        (MergeTree, 43.2M rows)
+  |-- energy_interval_features    (ReplacingMergeTree, computed baselines)
+  |-- neighborhood_slot_rollup    (AggregatingMergeTree MV, live rollups)
+```
+
+### Why ClickHouse (not SQLite/Postgres/in-memory)
+- **Scale**: 43.2M rows (5,000 households × 180 days × 48 slots/day) — queries in milliseconds
+- **Column-oriented**: perfect for time-series analytics (half-hourly slots, date ranges, aggregations)
+- **Materialized views**: pre-computed neighbourhood rollups update automatically on insert
+- **Demo credibility**: "We are not faking analytics in memory — ClickHouse serves live behavioural and grid queries over tens of millions of intervals fast enough for interactive coaching"
+- **Dual challenge unlock**: SP Group challenge + ClickHouse special challenge rubric
 
 ### Why NOT MCP + RAG
 - MCP: unnecessary overhead — not integrating multiple external tool providers
 - RAG: overkill for a hackathon — structured insight objects instead of document retrieval
-- The judge is a data scientist; correct, simple architecture is more credible than buzzword complexity
+- LibreChat: not used as main UI — our Next.js chat interface is simpler and faster to build
 - Use Claude API **only where AI genuinely adds value**: natural language explanation and coaching
-- Use deterministic code for **signal extraction**: peak detection, baseline calculation, anomaly flagging
+- Use ClickHouse for **all analytics**: peak detection, baseline, neighbourhood comparison, DR analysis
 
-### Mock Data Schema
+---
+
+## ClickHouse Integration (Special Challenge)
+
+### Database Schema
+
+**Table 1: Raw Interval Facts (MergeTree)**
+```sql
+CREATE TABLE energy_intervals_raw
+(
+  household_id    UInt64,
+  neighborhood_id LowCardinality(String),
+  flat_type       LowCardinality(String),
+  tariff_plan     LowCardinality(String) DEFAULT 'regulated',
+  ts              DateTime('Asia/Singapore'),
+  interval_date   Date MATERIALIZED toDate(ts),
+  slot_idx        UInt8 MATERIALIZED (toHour(ts) * 2 + intDiv(toMinute(ts), 30)),
+  kwh             Decimal(8,3),
+  cost_sgd        Decimal(8,4),
+  carbon_kg       Decimal(8,4),
+  peak_flag       Bool,
+  dr_event_flag   Bool DEFAULT 0,
+  ingestion_ts    DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(interval_date)
+ORDER BY (household_id, interval_date, ts);
+-- Scale: 5,000 households x 180 days x 48 slots = 43.2M rows
+```
+
+**Table 2: Computed Features (ReplacingMergeTree)**
+```sql
+CREATE TABLE energy_interval_features
+(
+  household_id      UInt64,
+  ts                DateTime('Asia/Singapore'),
+  interval_date     Date,
+  slot_idx          UInt8,
+  baseline_kwh      Decimal(8,3),   -- rolling 4-week same-slot avg
+  excess_kwh        Decimal(8,3),   -- kwh - baseline_kwh
+  anomaly_score     Float32,        -- z-score vs baseline
+  shiftable_candidate Bool,
+  grid_helper_points Float32,
+  version_ts        DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(version_ts)
+PARTITION BY toYYYYMM(interval_date)
+ORDER BY (household_id, interval_date, ts);
+-- ReplacingMergeTree: recompute baselines by inserting newer version, not UPDATE
+```
+
+**Table 3: Neighbourhood Rollup (AggregatingMergeTree + MV)**
+```sql
+CREATE TABLE neighborhood_slot_rollup
+(
+  neighborhood_id LowCardinality(String),
+  interval_date   Date,
+  slot_idx        UInt8,
+  total_kwh       AggregateFunction(sum, Decimal(12,3)),
+  homes           AggregateFunction(uniq, UInt64)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(interval_date)
+ORDER BY (neighborhood_id, interval_date, slot_idx);
+
+CREATE MATERIALIZED VIEW neighborhood_slot_rollup_mv
+TO neighborhood_slot_rollup AS
+SELECT
+  neighborhood_id,
+  interval_date,
+  slot_idx,
+  sumState(kwh)              AS total_kwh,
+  uniqState(household_id)    AS homes
+FROM energy_intervals_raw
+GROUP BY neighborhood_id, interval_date, slot_idx;
+-- MV updates live on every insert — no manual refresh needed
+```
+
+### Design Decisions (ClickHouse Best Practices)
+- `LowCardinality(String)` for flat_type, neighborhood_id, tariff_plan — low unique values
+- `UInt8` for slot_idx (0-47) — minimal bitwidth
+- No `Nullable` columns — use defaults instead
+- Monthly partitioning — not by household or day (avoid too many parts)
+- Primary key order: household_id first, then date, then ts — matches drilldown query pattern
+- Never `ALTER TABLE UPDATE` features — insert new version via ReplacingMergeTree
+
+### 5 Live Demo SQL Queries
+
+**Query 1: Peak-Load Heatmap (Neighbourhood Grid View)**
+```sql
+SELECT
+  interval_date,
+  slot_idx,
+  round(sumMerge(total_kwh), 2) AS total_kwh_mwh,
+  formatReadableQuantity(uniqMerge(homes))  AS active_homes
+FROM neighborhood_slot_rollup
+WHERE neighborhood_id = 'toa-payoh'
+  AND interval_date >= today() - 7
+GROUP BY interval_date, slot_idx
+ORDER BY interval_date, slot_idx;
+-- Hits pre-aggregated MV — returns in <100ms even at full scale
+```
+
+**Query 2: Household Anomaly Detection**
+```sql
+SELECT
+  r.ts,
+  r.kwh,
+  f.baseline_kwh,
+  round(r.kwh - f.baseline_kwh, 3) AS excess_kwh,
+  f.anomaly_score
+FROM energy_intervals_raw r
+ANY INNER JOIN energy_interval_features f
+  USING (household_id, ts, interval_date, slot_idx)
+WHERE r.household_id = 10042
+  AND r.interval_date = today() - 1
+  AND f.anomaly_score > 2
+ORDER BY f.anomaly_score DESC
+LIMIT 10;
+```
+
+**Query 3: Similar-Home Comparison (Mdm Tan vs Neighbours)**
+```sql
+WITH mdm_tan AS (
+  SELECT sum(kwh) AS day_kwh
+  FROM energy_intervals_raw
+  WHERE household_id = 10042
+    AND interval_date = today() - 1
+)
+SELECT
+  (SELECT day_kwh FROM mdm_tan) AS mdm_tan_kwh,
+  quantileExact(0.5)(day_kwh)   AS neighbourhood_median_kwh,
+  quantileExact(0.9)(day_kwh)   AS neighbourhood_p90_kwh
+FROM (
+  SELECT household_id, sum(kwh) AS day_kwh
+  FROM energy_intervals_raw
+  WHERE flat_type = '4-room HDB'
+    AND neighborhood_id = 'toa-payoh'
+    AND interval_date = today() - 1
+  GROUP BY household_id
+);
+-- "Mdm Tan used 8% more than the median similar home yesterday"
+```
+
+**Query 4: Demand-Response Event Impact**
+```sql
+SELECT
+  dr_event_flag,
+  slot_idx,
+  round(avg(kwh), 3)            AS avg_kwh_per_slot,
+  count()                       AS interval_count
+FROM energy_intervals_raw
+WHERE neighborhood_id = 'toa-payoh'
+  AND interval_date >= today() - 28
+GROUP BY dr_event_flag, slot_idx
+ORDER BY slot_idx, dr_event_flag;
+-- Shows measurable load reduction during DR events vs normal slots
+```
+
+**Query 5: Grid Helper Leaderboard (Top Flexible Households)**
+```sql
+SELECT
+  f.household_id,
+  round(sumIf(f.excess_kwh, r.peak_flag = 1), 2) AS peak_excess_kwh,
+  round(sum(f.grid_helper_points), 2)             AS grid_helper_score
+FROM energy_interval_features f
+ANY INNER JOIN energy_intervals_raw r
+  USING (household_id, ts, interval_date, slot_idx)
+WHERE f.interval_date >= today() - 7
+GROUP BY f.household_id
+ORDER BY grid_helper_score DESC
+LIMIT 20;
+-- "Top 20 most grid-flexible homes in Toa Payoh this week"
+```
+
+### Next.js API Route Pattern (Safe ClickHouse Access)
+```typescript
+// app/api/grid/route.ts
+import { createClient } from '@clickhouse/client'
+
+const client = createClient({
+  host: process.env.CLICKHOUSE_HOST,
+  username: process.env.CLICKHOUSE_USER,
+  password: process.env.CLICKHOUSE_PASSWORD,
+  database: 'wattcoach',
+})
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url)
+  const neighborhood = searchParams.get('neighborhood') ?? 'toa-payoh'
+
+  const result = await client.query({
+    query: `
+      SELECT interval_date, slot_idx, round(sumMerge(total_kwh), 2) AS total_kwh
+      FROM neighborhood_slot_rollup
+      WHERE neighborhood_id = {neighborhood:String}
+        AND interval_date >= today() - 7
+      GROUP BY interval_date, slot_idx
+      ORDER BY interval_date, slot_idx
+    `,
+    query_params: { neighborhood },
+    format: 'JSONEachRow',
+  })
+  const rows = await result.json()
+  return Response.json(rows)
+}
+```
+
+### Data Generation Script (to populate 43.2M rows)
+```typescript
+// scripts/seed-clickhouse.ts
+// 5,000 households x 180 days x 48 slots = 43,200,000 rows
+// Batch insert 50,000 rows at a time
+// Realistic patterns: AC spikes at 8-11pm, laundry at 9pm, low overnight
+// Neighborhoods: toa-payoh (2,000), bedok (1,500), jurong-west (1,500)
+// Flat types: 4-room HDB (60%), 5-room HDB (25%), Condo (15%)
+```
+
+### ClickHouse Special Challenge Positioning
+| What ClickHouse Judges Look For | How WattCoach Delivers |
+|---|---|
+| Clear fit for ClickHouse | Half-hourly time-series energy data — textbook ClickHouse use case |
+| Visible scale | 43.2M rows, not a toy dataset |
+| Real-time analytical usefulness | Live SQL driving interactive coach + grid views |
+| ClickHouse-native design | Proper MergeTree, ReplacingMergeTree, AggregatingMergeTree MV |
+| Integration depth | ClickHouse powers both household coach AND city-scale grid analytics |
+| Demo credibility | Sub-second queries, explainable metrics, sensible schema |
+
+### Optional: HyperDX/ClickStack Observability (Stretch Goal)
+If time allows, emit OpenTelemetry events to HyperDX to track:
+- `recommendation_shown` → `recommendation_accepted` → `recommendation_followed` → `impact_verified`
+- Claude API latency per query
+- ClickHouse query latency per endpoint
+- This demonstrates WattCoach is "production-instrumented" — bonus for engineering quality judges
+
+**Verdict on ClickHouse products**:
+- ClickHouse Cloud: **YES — core integration**
+- LibreChat: **NO — our Next.js chat is better and faster to build**
+- HyperDX/ClickStack: **OPTIONAL — add only if P0 features are stable**
+
+---
+
+## Smart Home Automation Layer (MCP Tool-Calling)
+
+### Concept: From Recommendations to Actions
+
+WattCoach goes beyond advice. When the AI coach recommends "Set AC timer: 10pm-2am at 25°C", the user can say **"Do it"** — and WattCoach executes the schedule automatically.
+
+```
+Recommendation → User approves → Claude calls tool → Action confirmed in UI
+                                                   → Simulator chart updates
+                                                   → ClickHouse logs action event
+```
+
+### Verdict: GO-WITH-CONSTRAINTS (Codex-verified)
+
+| Option | Verdict | Reason |
+|---|---|---|
+| Real Google Home / Nest SDM | NO-GO | Requires physical Nest device, $5 enrollment, OAuth, GCP project — blocked without hardware |
+| Real Alexa Smart Home Skills | NO-GO | Requires AWS Lambda, Alexa developer account, account linking, physical Alexa device |
+| Home Assistant integration | RISKY | Possible but 6-10hr overhead unless team knows it already |
+| **Mock MCP tool-calling layer** | **GO** | **Feasible in 2-4hrs, impressive in demo, honest about simulation** |
+
+**Build only after P0 features (ClickHouse + chart + coach) are stable.**
+
+### What to Build: Mock Smart Home Action Service
+
+**Step 1 — Server-side device state store** (in-memory JSON for demo):
+```typescript
+// lib/device-store.ts
+interface DeviceAction {
+  actionId: string
+  householdId: string
+  deviceId: string
+  actionType: 'ac_schedule' | 'laundry_delay' | 'standby_off'
+  params: Record<string, unknown>
+  status: 'scheduled' | 'active' | 'completed' | 'cancelled'
+  projectedKwhSaved: number
+  projectedSgdSaved: number
+  createdAt: string
+}
+
+// In-memory store (survives the demo session)
+const deviceActions: DeviceAction[] = []
+```
+
+**Step 2 — Claude tool definitions** (passed to Messages API `tools` parameter):
+```typescript
+const SMART_HOME_TOOLS = [
+  {
+    name: 'set_ac_schedule',
+    description: 'Schedule the air-conditioner to turn on and off at specific times, with optional temperature setting. Use when the user wants to automate their AC timing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        householdId:   { type: 'string' },
+        deviceId:      { type: 'string', default: 'ac.bedroom' },
+        startTime:     { type: 'string', description: 'ISO 8601 datetime in SGT' },
+        endTime:       { type: 'string', description: 'ISO 8601 datetime in SGT' },
+        temperatureC:  { type: 'number', minimum: 16, maximum: 30, default: 25 }
+      },
+      required: ['householdId', 'startTime', 'endTime']
+    }
+  },
+  {
+    name: 'schedule_laundry_cycle',
+    description: 'Schedule the washing machine to start at a specific off-peak time. Use when user wants to shift laundry to off-peak hours.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        householdId: { type: 'string' },
+        startTime:   { type: 'string', description: 'ISO 8601 datetime in SGT, preferably after 11pm' }
+      },
+      required: ['householdId', 'startTime']
+    }
+  }
+]
+```
+
+**Step 3 — Tool execution handler** (Next.js API route):
+```typescript
+// app/api/coach/route.ts (extended)
+async function executeToolCall(tool: ToolCall): Promise<ToolResult> {
+  if (tool.name === 'set_ac_schedule') {
+    const { startTime, endTime, temperatureC = 25 } = tool.input
+    // Compute projected savings deterministically
+    const durationHours = (new Date(endTime).getTime() - new Date(startTime).getTime()) / 3600000
+    const projectedKwh = durationHours * 0.2  // ~0.2 kWh/hr savings from optimised schedule
+    const projectedSgd = projectedKwh * 0.2911
+
+    const action: DeviceAction = {
+      actionId: `ACT-${Date.now()}`,
+      householdId: tool.input.householdId,
+      deviceId: 'ac.bedroom',
+      actionType: 'ac_schedule',
+      params: tool.input,
+      status: 'scheduled',
+      projectedKwhSaved: projectedKwh,
+      projectedSgdSaved: projectedSgd,
+      createdAt: new Date().toISOString()
+    }
+    deviceActions.push(action)
+
+    return {
+      status: 'scheduled',
+      actionId: action.actionId,
+      message: `AC scheduled: ${startTime} to ${endTime} at ${temperatureC}°C`,
+      projectedKwhSaved: projectedKwh,
+      projectedSgdSaved: projectedSgd
+    }
+  }
+  // ... handle schedule_laundry_cycle similarly
+}
+```
+
+**Step 4 — UI confirmation** (after tool call returns):
+```
+[Chat bubble] "Done! I've scheduled your AC:"
+┌─────────────────────────────────────────┐
+│  AC Bedroom  [Automated] ✓              │
+│  10:00pm → 2:00am  •  25°C             │
+│  Tonight's saving: 0.8 kWh • S$0.23    │
+│  [Cancel]  [View in simulator]          │
+└─────────────────────────────────────────┘
+```
+- Simulator chart updates automatically to show the scheduled shift
+- ClickHouse logs the `action_scheduled` event (for observability)
+
+### MCP Branding (Optional — if time allows)
+If the team wants the explicit "MCP" story for judges:
+1. Wrap the tool handler behind a tiny `@modelcontextprotocol/sdk` TypeScript server
+2. Connect via `mcp_servers` in the Anthropic client
+3. Same tools, same actions — just adds the official MCP protocol layer
+
+**If time is tight**: Use direct `tool_use` in the Messages API — functionally identical for the demo, and honest to describe as "MCP-compatible tool actions".
+
+### Demo Language (How to Present This Honestly)
+**SAY**: "For the demo, we use a simulated smart-home control layer exposed as tool actions via Claude's tool-use API — the same pattern as MCP. In production, this same action layer connects to real smart-home platforms like Google Home, Home Assistant, or Alexa."
+
+**SAY**: "The important point is that WattCoach doesn't stop at recommendations — it can turn an accepted recommendation into an executable household action with one tap."
+
+**DON'T SAY**: "We integrated with Google Home" (unless you actually did)
+
+---
+
+### Mock Data Schema (TypeScript types matching ClickHouse schema)
 ```typescript
 interface HalfHourlyInterval {
   ts: string;              // ISO 8601 with SGT offset
@@ -240,11 +648,15 @@ Claude's role: receive structured insight objects -> generate plain-language exp
 - Show SP App as-is: here is the half-hourly chart. "What does this mean? What should Mdm Tan do?"
 - Answer: nothing. Raw data. No guidance.
 
-**Act 2: WattCoach AI Chat (2 min)**
+**Act 2: WattCoach AI Chat + Action (3 min)**
 - Mdm Tan types: "Why was my electricity so high on Tuesday night?"
 - WattCoach responds with explainable attribution: AC + laundry overlap, 62% of evening spike
 - She asks: "What can I do tonight to save money?"
 - WattCoach gives 3 ranked actions with S$ savings, CO2 avoided, confidence score
+- [NEW] She taps "Do it" on the AC recommendation
+- WattCoach calls `set_ac_schedule` tool → "Done! AC scheduled: 10pm-2am at 25°C. Tonight's saving: 0.8 kWh, S$0.23"
+- Chart updates automatically showing the projected shift
+- "This is not just advice — it's an action. The coach moves from recommend to execute."
 
 **Act 3: Peak-Shift Simulator (3 min)** [WOW MOMENT]
 - Show tonight's projected usage on half-hourly chart
@@ -263,7 +675,20 @@ Claude's role: receive structured insight objects -> generate plain-language exp
 - "Following WattCoach recommendations: 8.3% reduction, S$9.48 saved, 11.2 kg CO2 avoided"
 - "If 100,000 households do this, peak demand drops by 45 MW — equivalent to a small peaker plant deferred"
 
-**Closing line**: "WattCoach is not a prettier SP App. It is the AI layer between raw data and real behaviour change — closing the loop that no existing solution closes today."
+**Act 5 (ClickHouse WOW): Neighbourhood Peak Stress Explorer (2 min)**
+- Switch to grid view: "Now let's zoom out from Mdm Tan's home to all of Toa Payoh"
+- Filter: 4-room HDB, last 7 days, weekdays
+- Live ClickHouse query fires — results return in under 1 second
+- Show peak-load heatmap: "43.2 million half-hourly intervals, queried live, sub-second"
+- Toggle: "If 15% of Toa Payoh 4-room households shifted one laundry cycle after 11pm, peak demand drops by X kWh"
+- Call out: "That is not a simulation — that is a ClickHouse materialized view running live on the real data scale SP Group would actually see"
+
+**Act 6: Impact Report (1 min)**
+- Month-on-month: actual vs. baseline (Mdm Tan)
+- "Following WattCoach recommendations: 8.3% reduction, S$9.48 saved, 11.2 kg CO2 avoided"
+- "If 100,000 households do this, peak demand drops by 45 MW — equivalent to a small peaker plant deferred"
+
+**Closing line**: "WattCoach is not a prettier SP App. It is the AI layer between raw data and real behaviour change — powered by ClickHouse at grid scale, closing the loop that no existing solution closes today."
 
 ---
 
@@ -415,40 +840,73 @@ const IMPACT_REPORT = {
 
 ## Build Priority (24-Hour Timeline)
 
-### True MVP (Must ship — 3 core deliverables)
+### Phase 0: ClickHouse Setup (Do First — 1.5-2 hrs)
+
+| Step | Action | Time |
+|---|---|---|
+| 1 | Create ClickHouse Cloud service, get credentials | 15 min |
+| 2 | Create 3 tables + MV (copy SQL from PRD) | 30 min |
+| 3 | Run data generation script — seed 43.2M rows in batches | 45 min |
+| 4 | Test 2 queries from Next.js API route | 20 min |
+
+**Do this first. All P0 features depend on ClickHouse being live.**
+
+### True MVP (Must ship — 4 core deliverables)
 
 | Priority | Feature | Time Estimate | Impact |
 |---|---|---|---|
-| P0 | **Interactive half-hourly chart + toggle simulator** | 3-4 hrs | WOW demo moment — non-negotiable |
-| P0 | **Deterministic insight pipeline** (baseline, peak detection, recommendations) | 2-3 hrs | Engine that makes everything credible |
+| P0 | **ClickHouse Cloud + 43.2M row dataset** | 1.5-2 hrs | Powers everything — foundation |
+| P0 | **Interactive half-hourly chart + toggle simulator** (reads from ClickHouse) | 3-4 hrs | WOW demo moment — non-negotiable |
+| P0 | **Deterministic insight pipeline** (API routes querying ClickHouse) | 2-3 hrs | Engine that makes everything credible |
 | P0 | **Controlled AI Coach chat** (Claude API, constrained prompts, 2-3 pre-built Q&A) | 2-3 hrs | Core differentiator — keep scope narrow |
 
-**Ship these 3. Demo is viable with just these.**
+**Ship these 4. Demo is viable with just these (and wins both SP + ClickHouse tracks).**
 
 ### Stretch Goals (Add only if P0 is solid and time allows)
 
 | Priority | Feature | Time Estimate | Impact |
 |---|---|---|---|
+| P1 | **Neighbourhood Peak Stress Explorer** (live ClickHouse MV query, filter by area/flat type) | 1-2 hrs | ClickHouse WOW + Grid Helper narrative |
 | P1 | Grid Helper Score display | 1 hr | Credibility with DS judge |
 | P1 | Impact Report before/after chart | 1-2 hrs | Demonstrated behaviour change |
+| P1 | **Neighbourhood Peak Stress Explorer** (live ClickHouse MV query) | 1-2 hrs | ClickHouse WOW moment |
+| P1 | Grid Helper Score display | 1 hr | Credibility with DS judge |
+| P1 | Impact Report before/after chart | 1-2 hrs | Demonstrated behaviour change |
+| P2 | **Smart Home Automation Layer** (mock MCP tool-calling: set_ac_schedule) | 2-4 hrs | Recommendations → Actions |
 | P2 | Habit Tracker + Streaks strip | 1-2 hrs | Gamification completeness |
 | P2 | Hero + Problem Statement sections | 1 hr | Polish |
+| P3 | HyperDX observability panel (optional bonus) | 1-2 hrs | Engineering quality bonus |
+| P3 | MCP server wrapper (if time allows, vs direct tool_use) | 1 hr | Explicit MCP story |
 | P3 | How It Works + Footer | 1 hr | Completeness |
 
-**Total MVP: ~7-10 hours. Full build: ~14-16 hours.**
+**Total MVP: ~9-12 hours. Full build: ~18-20 hours.**
 
-**Scope discipline rule**: Do NOT start P1 until all 3 P0 features are demo-stable end-to-end.
+**Scope discipline rules**:
+- Do NOT start P1 until all 4 P0 features are demo-stable end-to-end
+- Do NOT start P2 automation until P1 Neighbourhood Explorer is working
+- Smart Home Automation is a **bonus** — demo is already strong without it
 
 ---
 
 ## Judging Criteria Alignment
 
+### SP Group Track
 | Criterion | Weight | How WattCoach Delivers |
 |---|---|---|
 | Impact | 30% | Demonstrated S$ savings, CO2 avoided, peak kW reduced — grounded in real Singapore tariff and emission data. 100K household extrapolation = 45 MW peak deferral. |
 | Relevance | 15% | Singapore HDB context, SP Group half-hourly data, real tariff (S$0.2911/kWh), NEA household profiles, demand response pilot stats. |
-| Solution Complexity | 20% | AI used intentionally: LLM for explanation only, deterministic analytics for signal extraction. Correct layered architecture that a data scientist will respect. |
-| Product Execution | 35% | Working end-to-end: real Claude API calls, live chart updates, streamed AI responses, before/after tracking. Judges can interact live. |
+| Solution Complexity | 20% | AI used intentionally: LLM for explanation only, ClickHouse for analytics at scale. Correct layered architecture a data scientist will respect. |
+| Product Execution | 35% | Working end-to-end: real Claude API calls, live ClickHouse queries, interactive chart, before/after tracking. Judges can interact live. |
+
+### ClickHouse Special Challenge
+| Criterion | How WattCoach Delivers |
+|---|---|
+| Clear fit for ClickHouse | Half-hourly time-series energy data — textbook ClickHouse use case |
+| Visible scale | 43.2M rows (5,000 households × 180 days × 48 slots) — not a toy dataset |
+| Real-time analytical usefulness | Live SQL drives interactive coach + Neighbourhood Peak Stress Explorer |
+| ClickHouse-native design | MergeTree + ReplacingMergeTree + AggregatingMergeTree MV — not "Postgres but faster" |
+| Integration depth | ClickHouse powers both household coach AND city-scale grid analytics |
+| Demo credibility | Sub-second queries, explainable metrics, defensible schema |
 
 ---
 
@@ -478,6 +936,8 @@ const IMPACT_REPORT = {
 | **LLM numeric hallucination** | **High** | **Medium** | All numbers computed in code and injected as context. Claude never calculates — only explains. Post-process responses to verify numbers match injected values. |
 | **Overclaiming behaviour change** | **Medium** | **Medium** | Clearly label impact report as "projected from following recommendations" — not observed real-world outcome. Use language: "If Mdm Tan followed these recommendations..." |
 | Unexpected judge question derails LLM | Medium | Medium | Constrain system prompt to energy domain. Graceful redirect for off-topic: "I can only analyse your SP electricity data." |
+| **Claiming real Google Home/Alexa integration** | **High** | **Low** | Never claim real device control. Demo language: "simulated smart-home layer; production connects to Google Home/Home Assistant." |
+| **Smart home automation scope creep** | **High** | **High** | Do NOT build this until P0+P1 are stable. Mock with in-memory store only. Skip if running short on time. |
 
 ---
 
