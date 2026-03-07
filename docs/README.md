@@ -92,16 +92,66 @@ Layer 3: Behaviour Change Loop (Frontend)
 
 ### Key Features (MVP for 24 Hours)
 
-#### Feature 1: AI Energy Coach Chat
-- User asks: "Why was my bill high last Tuesday?"
-- WattCoach responds with interval-data-grounded explanation:
-  - "Your AC ran for 4 hours from 8pm-12am on Tuesday, which accounts for 62% of that evening's spike."
-- User asks: "What should I do tonight?"
-- WattCoach responds with 3 ranked actions:
-  1. "Pre-cool your home at 6pm for 30 min, then raise thermostat to 25°C — saves ~0.8 kWh tonight"
-  2. "Schedule laundry after 11pm if you are on a TOU plan — saves S$1.20 this cycle"
-  3. "Turn off standby devices before bed — saves ~0.15 kWh/night"
-- Each recommendation includes: estimated kWh saved, S$ saved, CO2 avoided, confidence level
+#### Feature 1: Proactive AI Energy Coach (Active, Not Passive)
+
+WattCoach does not wait for the user to ask questions. It monitors half-hourly data and **proactively surfaces insights** when something important is detected.
+
+**Proactive Trigger Engine** (3 triggers for demo):
+```typescript
+type InsightTrigger =
+  | 'peak_spike_detected'      // Tonight's 7-11pm usage is projected above baseline
+  | 'weekly_review_ready'      // End-of-week summary with top recommendation
+  | 'demand_response_window'   // Simulated grid stress event tonight
+
+interface ProactiveInsight {
+  id: string
+  trigger: InsightTrigger
+  priority: 'high' | 'medium' | 'low'
+  title: string
+  message: string
+  evidence: {
+    baseline_kwh: number
+    projected_kwh?: number
+    excess_kwh?: number
+    matching_days?: number
+  }
+  recommended_action: string
+  estimated_kwh_saved: number
+  estimated_sgd_saved: number
+  estimated_co2_kg_saved: number
+  can_automate: boolean   // shows "Do this for me" button
+}
+```
+
+**Pre-built proactive insights for Mdm Tan (demo-ready)**:
+
+*Insight 1 — Tonight Peak Warning (peak_spike_detected)*:
+- Title: "Your 8pm-10pm usage is likely to exceed your usual Thursday pattern"
+- Message: "Your projected usage is 28% above your usual peak window. Pattern looks similar to previous AC + laundry overlap evenings."
+- Action: "Delay laundry until after 11pm and pre-cool living room before 7pm."
+- Impact: 1.3 kWh saved, S$0.38, 0.52 kg CO2 | can_automate: true
+
+*Insight 2 — Weekly Coaching Summary (weekly_review_ready)*:
+- Title: "You reduced evening peak usage this week — but AC remains your largest driver"
+- Message: "Your 7pm-11pm consumption fell 11% vs last week. Estimated cooling still accounts for 42% of usage."
+- Action: "Set a 2am auto-off for AC on weekdays."
+- Impact: S$7-S$11/month projected | can_automate: true
+
+*Insight 3 — Demand Response Event (demand_response_window)*:
+- Title: "Grid stress expected tonight from 7pm-10pm — your home can help"
+- Message: "If you shift one laundry cycle and delay water heating, your home can reduce peak stress by an estimated 0.9 kWh."
+- Action: "Join tonight's Grid Helper challenge"
+- Impact: Moves into top 15% of similar homes this week
+
+**UI Delivery Pattern** (Next.js, no real push service needed):
+- Notification bell (top-right) with count badge
+- High-priority banner slides in after 3-second delay (simulates background detection)
+- Clicking opens proactive coach card with: reason + evidence + recommended action + projected savings + "Do this for me" button
+- After action: chart updates + savings counter ticks + confirmation appears
+
+**Demo trigger**: In demo, the insight fires automatically via `setTimeout(..., 3000)` after page load. Frame it as: "For this demo we trigger the same insight pipeline on demand. In production this runs automatically on new interval data."
+
+**Passive chat (also supported)**: User can still ask questions — "Why was my bill high last Tuesday?" → coach responds with interval-data-grounded explanation. Both modes coexist.
 
 #### Feature 2: Peak-Shift Simulator (WOW DEMO MOMENT)
 - Interactive half-hourly chart for "today"
@@ -121,15 +171,81 @@ Layer 3: Behaviour Change Loop (Frontend)
   - Demand response events participated in
 - Framing: "Your home is a Flexible Grid Asset" — language the energy data scientist will immediately respect
 
-#### Feature 4: Habit Tracker with Streaks
+#### Feature 4: Estimated Appliance Breakdown (NEW)
+
+SP App shows only total half-hourly usage. WattCoach adds estimated per-appliance breakdown using pattern heuristics.
+
+**Singapore HDB Heuristics** (always labeled "estimated"):
+
+| Appliance | Detection Pattern | Typical Range |
+|---|---|---|
+| Air-conditioner | Sustained 0.6-1.2 kWh/slot for 2+ consecutive slots, 8pm-1am | 0.6-1.2 kWh/slot |
+| Washing machine | Short spike 0.8-1.5 kWh lasting 1-2 slots, evening or weekend | 0.8-1.5 kWh/event |
+| Water heater | 0.3-0.6 kWh burst, 6-8am or late evening, 1-2 slots | 0.3-0.6 kWh/event |
+| Fridge | Constant ~0.05-0.08 kWh every slot (baseline always-on) | 0.04-0.08 kWh/slot |
+| Lighting & standby | Residual after subtracting above estimates | Varies |
+
+**Always label**: "Estimated appliance breakdown — derived from pattern heuristics on whole-home half-hourly usage. Not device-level metering."
+
+**Visualizations**:
+- Daily stacked bar chart (48 half-hour slots): AC layer + washer spike + water heater burst + fridge baseline + residual
+- Monthly donut breakdown: "AC 41% · Fridge 16% · Lighting & Standby 19% · Laundry 8% · Water Heater 10% · Other 6%"
+- Each appliance card: estimated kWh/month, estimated cost, share of bill, trend vs last month
+
+**Proactive connection**: Monthly analysis fires `monthly_analysis_ready` insight: "Your February analysis is ready. Estimated cooling accounted for 43% of your usage. I found 2 ways to lower that next month."
+
+#### Feature 5: Habit Tracker with Streaks
 - "Off-peak laundry streak: 4 days"
 - "AC pre-cool habit: 2 of 7 days this week"
 - Weekly mission: "Shift 3 high-energy activities to off-peak this week — earn your Grid Hero badge"
 - Progress bar with estimated cumulative savings
+- Explicit habit loop surface: action completed → streak updated → next milestone shown → badge earned
 
-#### Feature 5: Explainable Impact Dashboard
+#### Feature 6: Monthly Analysis Page (NEW)
+
+Transforms SP's monthly usage total into a rich, explainable breakdown. Fires the `monthly_analysis_ready` proactive insight.
+
+**Six sections**:
+1. **Monthly summary** — Total kWh, estimated bill, CO2, change vs last month, change vs 3-month baseline
+2. **Estimated appliance breakdown** — Monthly donut + appliance table (kWh, cost, share, trend)
+3. **Key insights** — 3 plain-language sentences: "Cooling was your biggest driver", "Laundry shifted later on 4 more days", "Evening peak fell 9%"
+4. **Similar-home benchmark** — Percentile rank vs same flat type in same neighbourhood ("You used 6% more than similar 4-room homes in Toa Payoh")
+5. **Recommended next actions** — Top 3 actions for next month with projected monthly impact
+6. **Grid impact** — Peak reduction kWh, Grid Helper Score trend, "Your home avoided X kWh during stress windows"
+
+#### Feature 7: Privacy-Safe Neighbourhood Leaderboard (NEW)
+
+**Composite score formula** (transparent to users):
+```
+Grid Hero Score = (Grid Helper Score × 50%) + (kWh reduction vs baseline × 30%) + (habit consistency × 20%)
+```
+
+**Why this formula**: Grid Helper alone is strong but not enough for consumer motivation. Raw reduction alone rewards high-baseline homes unfairly. Composite keeps it demand-response-aligned while being motivating.
+
+**Leaderboard tiers** (weekly reset):
+- Grid Hero (top 10%)
+- Peak Saver (top 25%)
+- Flex-Ready (top 50%)
+- Getting Started (bottom 50%)
+
+**Privacy design**:
+- No real names or addresses
+- Anonymous IDs: `TPY-4R-018`, `TPY-4R-031`, `You`
+- Scoped to: same flat type within same neighbourhood
+- Display: "You rank #18 of 126 among 4-room HDB homes in Toa Payoh this week"
+
+**Motivating mechanics**:
+- Percentile rank ("You beat 86% of similar homes")
+- Near-goal framing: "One more off-peak laundry cycle moves you into top 10%"
+- Weekly reset keeps it fresh and achievable
+- Three tabs: This Week · Similar Homes · Grid Heroes
+
+**Connection to grid**: Leaderboard caption — "Top performers collectively reduced 2.3 MWh of peak demand across Toa Payoh this week"
+
+#### Feature 8: Explainable Impact Dashboard
 - Month-over-month comparison: actual kWh vs. baseline (counterfactual without behaviour change)
 - Per-recommendation tracking: "Did the user follow this advice? What was the actual outcome?"
+- Clearly labeled: "Projected impact" (recommendations not yet followed) vs "Estimated observed" (based on actual interval data after recommendation)
 - Aggregate: S$ saved, kg CO2 avoided, peak kW reduced
 - "Your changes this month equivalent to: X trees planted / X km not driven"
 
@@ -645,50 +761,43 @@ Claude's role: receive structured insight objects -> generate plain-language exp
 ### Demo Flow (8-10 minutes)
 
 **Act 1: The Problem (1 min)**
-- Show SP App as-is: here is the half-hourly chart. "What does this mean? What should Mdm Tan do?"
-- Answer: nothing. Raw data. No guidance.
+- Show SP App as-is: "Here is the half-hourly chart. What does this mean? What should Mdm Tan do?"
+- Answer: nothing. Raw numbers. No guidance. No proactive alerts. No appliance breakdown.
 
-**Act 2: WattCoach AI Chat + Action (3 min)**
-- Mdm Tan types: "Why was my electricity so high on Tuesday night?"
-- WattCoach responds with explainable attribution: AC + laundry overlap, 62% of evening spike
-- She asks: "What can I do tonight to save money?"
-- WattCoach gives 3 ranked actions with S$ savings, CO2 avoided, confidence score
-- [NEW] She taps "Do it" on the AC recommendation
-- WattCoach calls `set_ac_schedule` tool → "Done! AC scheduled: 10pm-2am at 25°C. Tonight's saving: 0.8 kWh, S$0.23"
-- Chart updates automatically showing the projected shift
-- "This is not just advice — it's an action. The coach moves from recommend to execute."
+**Act 2: Proactive Coach** [WOW MOMENT #1 — 2 min]
+- Open WattCoach. Notification bell shows "1 new insight"
+- After 3 seconds, banner slides in: "New insight: Your 8pm-10pm usage is projected above your usual Thursday pattern"
+- "WattCoach did not wait for Mdm Tan to ask. It found the issue on its own."
+- Open insight: coach explains AC + laundry overlap pattern with evidence (28% above baseline)
+- Shows 3 ranked actions with S$, CO2, confidence badge
+- Mdm Tan taps "Do this for me" on the AC recommendation
+- `set_ac_schedule` fires: "Done! AC scheduled 10pm-2am at 25°C — tonight's saving: 0.8 kWh, S$0.23"
 
-**Act 3: Peak-Shift Simulator (3 min)** [WOW MOMENT]
-- Show tonight's projected usage on half-hourly chart
-- Toggle "Pre-cool AC at 6pm" ON — chart updates, peak window drops
-- Toggle "Schedule laundry after 11pm" ON — another drop
-- Live counter: "You would save S$4.20 tonight and reduce peak demand by 18% from your usual 9pm load"
-- Call out to judge: "This is what demand response looks like at the household level — measurable, explainable, actionable."
+**Act 3: Simulator + Appliance Breakdown (2 min)** [WOW MOMENT #2]
+- Chart updates: AC schedule block appears at 10pm, peak bars drop visibly
+- Toggle laundry delay ON — 9pm peak bar drops further
+- Live counter: "Tonight: 1.3 kWh saved · S$0.38 · 0.52 kg CO2"
+- Switch to Analysis tab — stacked bar shows: AC layer in evening, washer spike, fridge baseline
+- Monthly donut: "Estimated cooling: 42% of your usage — your biggest driver"
+- "SP App shows total kWh. WattCoach shows what is actually driving it."
 
-**Act 4: Grid Helper Score (2 min)**
-- Show weekly Grid Helper Score: 73/100
-- "Mdm Tan shifted 4 of 6 high-load activities off-peak this week"
-- "Her home is a Flexible Grid Asset — SP Group could send her a demand response signal and she is already trained to respond"
+**Act 4: Leaderboard + Grid Hero Score (1 min)**
+- Leaderboard tab: "Mdm Tan ranks #18 of 126 — 4-room HDB homes in Toa Payoh this week"
+- "She beat 86% of similar homes. Up from #31 last week."
+- "One more off-peak laundry cycle → top 10%"
+- Grid Hero Score: 73/100, tier: "Flex-Ready Home"
 
-**Act 5: Impact Report (1 min)**
-- Month-on-month: actual vs. baseline
-- "Following WattCoach recommendations: 8.3% reduction, S$9.48 saved, 11.2 kg CO2 avoided"
-- "If 100,000 households do this, peak demand drops by 45 MW — equivalent to a small peaker plant deferred"
+**Act 5: Neighbourhood Grid View (ClickHouse)** [WOW MOMENT #3 — 2 min]
+- Switch to City Grid: "Zoom out from Mdm Tan's home to all of Toa Payoh"
+- Live ClickHouse query — 43.2M rows, returns in under 1 second
+- Peak-load heatmap: "If 15% of Toa Payoh 4-room homes act on tonight's WattCoach insight, peak demand drops by X kWh"
+- "That is a ClickHouse materialized view running live at SP Group operating scale."
 
-**Act 5 (ClickHouse WOW): Neighbourhood Peak Stress Explorer (2 min)**
-- Switch to grid view: "Now let's zoom out from Mdm Tan's home to all of Toa Payoh"
-- Filter: 4-room HDB, last 7 days, weekdays
-- Live ClickHouse query fires — results return in under 1 second
-- Show peak-load heatmap: "43.2 million half-hourly intervals, queried live, sub-second"
-- Toggle: "If 15% of Toa Payoh 4-room households shifted one laundry cycle after 11pm, peak demand drops by X kWh"
-- Call out: "That is not a simulation — that is a ClickHouse materialized view running live on the real data scale SP Group would actually see"
+**Act 6: Monthly Impact (1 min)**
+- Monthly report: "8.3% reduction, S$9.48 saved, 11.2 kg CO2 avoided this month"
+- "100,000 households doing this = 45 MW peak deferral — equivalent to a small peaker plant"
 
-**Act 6: Impact Report (1 min)**
-- Month-on-month: actual vs. baseline (Mdm Tan)
-- "Following WattCoach recommendations: 8.3% reduction, S$9.48 saved, 11.2 kg CO2 avoided"
-- "If 100,000 households do this, peak demand drops by 45 MW — equivalent to a small peaker plant deferred"
-
-**Closing line**: "WattCoach is not a prettier SP App. It is the AI layer between raw data and real behaviour change — powered by ClickHouse at grid scale, closing the loop that no existing solution closes today."
+**Closing**: "WattCoach is the AI layer between raw SP data and real behaviour change. Proactive. Explainable. Actionable. Verified. The full loop — closed."
 
 ---
 
@@ -851,40 +960,79 @@ const IMPACT_REPORT = {
 
 **Do this first. All P0 features depend on ClickHouse being live.**
 
-### True MVP (Must ship — 4 core deliverables)
+### True MVP (P0 — Must ship)
 
-| Priority | Feature | Time Estimate | Impact |
+| Priority | Feature | Time | Impact |
 |---|---|---|---|
-| P0 | **ClickHouse Cloud + 43.2M row dataset** | 1.5-2 hrs | Powers everything — foundation |
-| P0 | **Interactive half-hourly chart + toggle simulator** (reads from ClickHouse) | 3-4 hrs | WOW demo moment — non-negotiable |
-| P0 | **Deterministic insight pipeline** (API routes querying ClickHouse) | 2-3 hrs | Engine that makes everything credible |
-| P0 | **Controlled AI Coach chat** (Claude API, constrained prompts, 2-3 pre-built Q&A) | 2-3 hrs | Core differentiator — keep scope narrow |
+| P0 | **ClickHouse Cloud + 43.2M row dataset** | 1.5-2 hrs | Foundation — everything depends on this |
+| P0 | **Proactive insight engine** (3 triggers, notification bell + banner) | 2-3 hrs | WOW #1 — proactive coach moment |
+| P0 | **Interactive chart + toggle simulator** (reads ClickHouse via API) | 3-4 hrs | WOW #2 — peak-shift visualisation |
+| P0 | **AI Coach** (Claude API, passive chat + set_ac_schedule tool action) | 2-3 hrs | Recommendation → Action flow |
 
-**Ship these 4. Demo is viable with just these (and wins both SP + ClickHouse tracks).**
+**Ship P0. Demo wins both SP + ClickHouse tracks with just these.**
 
-### Stretch Goals (Add only if P0 is solid and time allows)
+### Stretch Goals (P1 — Add if P0 is stable)
 
-| Priority | Feature | Time Estimate | Impact |
+| Priority | Feature | Time | Impact |
 |---|---|---|---|
-| P1 | **Neighbourhood Peak Stress Explorer** (live ClickHouse MV query, filter by area/flat type) | 1-2 hrs | ClickHouse WOW + Grid Helper narrative |
-| P1 | Grid Helper Score display | 1 hr | Credibility with DS judge |
-| P1 | Impact Report before/after chart | 1-2 hrs | Demonstrated behaviour change |
-| P1 | **Neighbourhood Peak Stress Explorer** (live ClickHouse MV query) | 1-2 hrs | ClickHouse WOW moment |
-| P1 | Grid Helper Score display | 1 hr | Credibility with DS judge |
-| P1 | Impact Report before/after chart | 1-2 hrs | Demonstrated behaviour change |
-| P2 | **Smart Home Automation Layer** (mock MCP tool-calling: set_ac_schedule) | 2-4 hrs | Recommendations → Actions |
-| P2 | Habit Tracker + Streaks strip | 1-2 hrs | Gamification completeness |
+| P1 | **Neighbourhood Grid View** (live ClickHouse MV, peak heatmap) | 1-2 hrs | WOW #3 — grid scale story |
+| P1 | **Estimated appliance breakdown** (stacked bar + monthly donut) | 1-2 hrs | "What's driving my usage" story |
+| P1 | **Privacy-safe leaderboard** (neighbourhood cohort, weekly composite score) | 1-2 hrs | Gamification + habit motivation |
+| P1 | Grid Hero Score display + tier badges | 1 hr | Demand-response credibility |
+| P1 | Monthly analysis panel (appliance + similar-home benchmark) | 1-2 hrs | Long-term habit story |
+
+### Nice-to-Have (P2 — Only if P0+P1 done)
+
+| Priority | Feature | Time | Impact |
+|---|---|---|---|
+| P2 | Impact Report before/after chart | 1 hr | Verified behaviour change |
+| P2 | Habit Tracker + streaks strip | 1 hr | Gamification completeness |
 | P2 | Hero + Problem Statement sections | 1 hr | Polish |
-| P3 | HyperDX observability panel (optional bonus) | 1-2 hrs | Engineering quality bonus |
-| P3 | MCP server wrapper (if time allows, vs direct tool_use) | 1 hr | Explicit MCP story |
+| P3 | HyperDX observability (optional bonus) | 1-2 hrs | Engineering quality |
 | P3 | How It Works + Footer | 1 hr | Completeness |
 
-**Total MVP: ~9-12 hours. Full build: ~18-20 hours.**
+**Total MVP (P0): ~9-12 hrs. Full build (P0+P1+P2): ~18-22 hrs.**
 
 **Scope discipline rules**:
-- Do NOT start P1 until all 4 P0 features are demo-stable end-to-end
-- Do NOT start P2 automation until P1 Neighbourhood Explorer is working
-- Smart Home Automation is a **bonus** — demo is already strong without it
+- Do NOT start P1 until all P0 features demo end-to-end reliably
+- Do NOT start P2 until P1 Neighbourhood Grid View and Leaderboard are working
+- Proactive coach notification is P0 — it is the #1 WOW moment, non-negotiable
+
+---
+
+## SP "What Success Looks Like" — Full Alignment
+
+| SP Success Criterion | WattCoach Feature | Status |
+|---|---|---|
+| **1. Make Energy Data Easy to Understand** | | |
+| Explain half-hourly usage patterns | Proactive insight coach + stacked bar chart | ✓ |
+| Highlight peak hours and unusual spikes | Peak_spike_detected trigger + 48-slot chart | ✓ |
+| Help users understand what is driving their use | Estimated appliance breakdown (heuristic) | ✓ |
+| **2. Actionable Behaviour Recommendations** | | |
+| Simple, practical behaviour changes | Ranked top-3 recommendations per insight | ✓ |
+| Specific actions (shift laundry, adjust AC) | set_ac_schedule, schedule_laundry tools | ✓ |
+| Transparent and easy to understand | Evidence cards: baseline vs actual, confidence | ✓ |
+| Gamify to encourage smarter use | Leaderboard + Grid Hero tiers + streaks | ✓ |
+| **3. Measurable Impact** | | |
+| Cost savings | S$ counter in simulator + monthly report | ✓ |
+| Carbon reduction | CO2 kg counter, monthly CO2 total | ✓ |
+| Lower peak demand | Peak reduction % in simulator, Grid Helper Score | ✓ |
+| **4. Build Long-Term Habits** | | |
+| Track progress over time | Monthly analysis page, Grid Helper trend | ✓ |
+| Provide feedback loops | Action → streak → badge → next milestone | ✓ |
+| Reward consistent sustainable behaviours | Leaderboard tiers, streak badges | ✓ |
+| Make energy efficiency feel achievable | Near-goal framing ("one more cycle = top 10%") | ✓ |
+| **5. Connect Individual Actions to Bigger Picture** | | |
+| Show how personal changes support grid reliability | Grid Helper Score in main UI, DR window insight | ✓ |
+| Link daily habits to broader energy efficiency goals | Neighbourhood Peak Stress Explorer, 45 MW macro claim | ✓ |
+
+**Gap assessment**: No significant gaps remaining. All 5 criteria are directly addressed by named features.
+
+**Key remaining risk**: The explicitness of the behaviour loop. Must show the full chain in demo:
+```
+Proactive insight → User accepts → Action executed → Chart shows projected drop →
+Next day: "Did you follow through?" → Outcome tracked → Habit reinforced → Leaderboard updates
+```
 
 ---
 
